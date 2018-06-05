@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
 
+import logging
 
 from saml2 import (
     BINDING_HTTP_POST,
@@ -33,6 +34,9 @@ if parse_version(get_version()) >= parse_version('1.7'):
     from django.utils.module_loading import import_string
 else:
     from django.utils.module_loading import import_by_path as import_string
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_current_domain(r):
@@ -115,6 +119,7 @@ def denied(r):
 
 
 def _create_new_user(username, email, firstname, lastname):
+    logger.info('Creating new user: username={username}, email={email}'.format(username=username, email=email))
     user = User.objects.create_user(username, email)
     user.first_name = firstname
     user.last_name = lastname
@@ -137,15 +142,18 @@ def acs(r):
     next_url = r.session.get('login_next_url', settings.SAML2_AUTH.get('DEFAULT_NEXT_URL', get_reverse('admin:index')))
 
     if not resp:
+        logger.warning('Received incorrect SAML response')
         return HttpResponseRedirect(get_reverse([denied, 'denied', 'django_saml2_auth:denied']))
 
     authn_response = saml_client.parse_authn_request_response(
         resp, entity.BINDING_HTTP_POST)
     if authn_response is None:
+        logger.warning('Could not parse SAML authenticate response')
         return HttpResponseRedirect(get_reverse([denied, 'denied', 'django_saml2_auth:denied']))
 
     user_identity = authn_response.get_identity()
     if user_identity is None:
+        logger.warning('Could not extract identity from SAML authenticate response')
         return HttpResponseRedirect(get_reverse([denied, 'denied', 'django_saml2_auth:denied']))
 
     user_email = user_identity[settings.SAML2_AUTH.get('ATTRIBUTES_MAP', {}).get('email', 'Email')][0]
@@ -161,19 +169,24 @@ def acs(r):
         if settings.SAML2_AUTH.get('TRIGGER', {}).get('BEFORE_LOGIN', None):
             import_string(settings.SAML2_AUTH['TRIGGER']['BEFORE_LOGIN'])(user_identity)
     except User.DoesNotExist:
+        logger.warning('Could not find local user by username: {username}'.format(username=user_name))
         target_user = _create_new_user(user_name, user_email, user_first_name, user_last_name)
         if settings.SAML2_AUTH.get('TRIGGER', {}).get('CREATE_USER', None):
             import_string(settings.SAML2_AUTH['TRIGGER']['CREATE_USER'])(user_identity)
         is_new_user = True
+        logger.info('Created new user: {username}'.format(username=user_name))
 
     r.session.flush()
 
     if target_user.is_active:
+        logger.info('Logging in user: {user}'.format(user=target_user.username))
         target_user.backend = 'django.contrib.auth.backends.ModelBackend'
         login(r, target_user)
     else:
+        logger.warning('Authenticated user is not active')
         return HttpResponseRedirect(get_reverse([denied, 'denied', 'django_saml2_auth:denied']))
 
+    logger.info('User logged in correctly, redirecting to SSO welcome page or URL: {url}'.format(url=next_url))
     if is_new_user:
         try:
             return render(r, 'django_saml2_auth/welcome.html', {'user': r.user})
@@ -200,6 +213,7 @@ def signin(r):
 
     # Only permit signin requests where the next_url is a safe URL
     if not is_safe_url(next_url):
+        logger.warning('Not redirecting user to unsafe page, unsafe URL is: {url}'.format(url=next_url))
         return HttpResponseRedirect(get_reverse([denied, 'denied', 'django_saml2_auth:denied']))
 
     r.session['login_next_url'] = next_url
@@ -214,6 +228,7 @@ def signin(r):
             redirect_url = value
             break
 
+    logger.info('Redirecting to URL: {url}'.format(url=redirect_url))
     return HttpResponseRedirect(redirect_url)
 
 
